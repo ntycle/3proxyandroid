@@ -69,6 +69,10 @@ install_3proxy() {
     mkdir -p $INSTALL_DIR/bin
     mkdir -p $LOG_DIR
     
+    # Tạo file log rỗng để tránh lỗi
+    touch $LOG_DIR/3proxy.log
+    chmod 644 $LOG_DIR/3proxy.log
+    
     # Copy binary
     cp bin/3proxy $INSTALL_DIR/bin/
     chmod +x $INSTALL_DIR/bin/3proxy
@@ -101,7 +105,10 @@ download_proxy_list() {
 generate_config() {
     log_info "Tạo file cấu hình 3proxy..."
     
-    cat > "$CONFIG_FILE" << 'EOF'
+    # Tạo thư mục log nếu chưa có
+    mkdir -p "$LOG_DIR"
+    
+    cat > "$CONFIG_FILE" << EOF
 # 3proxy configuration file
 # Generated automatically
 
@@ -112,7 +119,7 @@ daemon
 maxconn 1000
 
 # Log settings
-log "$LOG_DIR/3proxy.log" D
+log $LOG_DIR/3proxy.log D
 rotate 30
 logformat "- +_L%t.%. %N.%p %E %U %C:%c %R:%r %O %I %h %T"
 
@@ -303,6 +310,11 @@ main() {
     # Kiểm tra nếu đã cài đặt
     if [ -f "$INSTALL_DIR/bin/3proxy" ]; then
         log_info "3proxy đã được cài đặt. Đang cập nhật cấu hình..."
+        # Đảm bảo thư mục log tồn tại
+        mkdir -p "$LOG_DIR"
+        touch "$LOG_DIR/3proxy.log"
+        chmod 644 "$LOG_DIR/3proxy.log"
+        
         download_proxy_list
         generate_config
         configure_firewall

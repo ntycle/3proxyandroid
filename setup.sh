@@ -112,28 +112,18 @@ generate_config() {
 # 3proxy configuration file
 # Generated automatically
 
-# Daemon mode
 daemon
-
-# Number of threads
-maxconn 1000
-
-# Log settings
 log $LOG_DIR/3proxy.log D
-rotate 30
-logformat "- +_L%t.%. %N.%p %E %U %C:%c %R:%r %O %I %h %T"
 
-# ACL - Allow all
-auth none
+# Authentication
+auth iponly
+
+# Allow all connections
+allow *
 
 # Bind to all interfaces
+external 0.0.0.0
 internal 0.0.0.0
-
-# Enable proxy protocols
-proxy
-
-# Flush logs
-flush
 
 EOF
 
@@ -160,8 +150,7 @@ EOF
         cat >> "$CONFIG_FILE" << EOF
 
 # Proxy #$count - Port $port -> $ip:$proxy_port
-auth none
-parent 1000 http $ip $proxy_port $user $pass
+parent 1000 connect $ip $proxy_port $user $pass
 proxy -p$port
 
 EOF

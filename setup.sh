@@ -1,8 +1,8 @@
 #!/bin/bash
 
 #############################################
-# 3proxy Auto Setup Script for AlmaLinux 8
-# Tự động cài đặt, cấu hình và quản lý 3proxy
+# 3proxy Multi-Instance Auto Setup Script
+# Mỗi proxy = 1 instance riêng biệt
 #############################################
 
 set -e
@@ -17,10 +17,9 @@ NC='\033[0m' # No Color
 PROXY_LIST_URL="https://raw.githubusercontent.com/ntycle/3proxyandroid/refs/heads/main/proxies.txt"
 BASE_PORT=10000
 INSTALL_DIR="/opt/3proxy"
-CONFIG_FILE="$INSTALL_DIR/3proxy.cfg"
-SERVICE_FILE="/etc/systemd/system/3proxy.service"
 LOG_DIR="/var/log/3proxy"
 PROXY_LIST_FILE="$INSTALL_DIR/proxies.txt"
+INSTANCES_DIR="$INSTALL_DIR/instances"
 
 # Hàm log
 log_info() {
@@ -68,10 +67,7 @@ install_3proxy() {
     # Tạo thư mục cài đặt
     mkdir -p $INSTALL_DIR/bin
     mkdir -p $LOG_DIR
-    
-    # Tạo file log rỗng để tránh lỗi
-    touch $LOG_DIR/3proxy.log
-    chmod 644 $LOG_DIR/3proxy.log
+    mkdir -p $INSTANCES_DIR
     
     # Copy binary
     cp bin/3proxy $INSTALL_DIR/bin/
@@ -101,35 +97,34 @@ download_proxy_list() {
     fi
 }
 
-# Tạo file cấu hình 3proxy
-generate_config() {
-    log_info "Tạo file cấu hình 3proxy..."
+# Dừng và xóa tất cả instance cũ
+cleanup_old_instances() {
+    log_info "Dọn dẹp các instance cũ..."
     
-    # Tạo thư mục log nếu chưa có
-    mkdir -p "$LOG_DIR"
+    # Dừng và disable tất cả service 3proxy-*
+    for service in /etc/systemd/system/3proxy-*.service; do
+        if [ -f "$service" ]; then
+            service_name=$(basename "$service")
+            systemctl stop "$service_name" 2>/dev/null || true
+            systemctl disable "$service_name" 2>/dev/null || true
+            rm -f "$service"
+        fi
+    done
     
-    cat > "$CONFIG_FILE" << EOF
-# 3proxy configuration file
-# Generated automatically
+    # Xóa thư mục instances cũ
+    rm -rf "$INSTANCES_DIR"
+    mkdir -p "$INSTANCES_DIR"
+    
+    systemctl daemon-reload
+}
 
-daemon
-log $LOG_DIR/3proxy.log D
-
-# Authentication
-auth iponly
-
-# Allow all connections
-allow *
-
-# Bind to all interfaces
-external 0.0.0.0
-internal 0.0.0.0
-
-EOF
-
-    # Đọc danh sách proxy và tạo cấu hình
+# Tạo instance cho mỗi proxy
+create_instances() {
+    log_info "Tạo instance cho từng proxy..."
+    
     local port=$BASE_PORT
     local count=0
+    local created_ports=()
     
     while IFS=: read -r ip proxy_port user pass; do
         # Loại bỏ khoảng trắng và ký tự xuống dòng
@@ -146,17 +141,41 @@ EOF
         
         count=$((count + 1))
         
-        # Thêm cấu hình cho mỗi proxy
-        cat >> "$CONFIG_FILE" << EOF
-
-# Proxy #$count - Port $port -> $ip:$proxy_port
+        # Tạo thư mục cho instance
+        local instance_dir="$INSTANCES_DIR/port-$port"
+        mkdir -p "$instance_dir"
+        
+        # Tạo config file cho instance này
+        cat > "$instance_dir/3proxy.cfg" << EOF
+daemon
+log $LOG_DIR/proxy-$port.log D
+auth iponly
+allow *
+external 0.0.0.0
+internal 0.0.0.0
 parent 1000 connect $ip $proxy_port $user $pass
 proxy -p$port
-
 EOF
         
-        log_info "Cấu hình Proxy #$count: Port $port -> $ip:$proxy_port (User: $user)"
+        # Tạo systemd service cho instance này
+        cat > "/etc/systemd/system/3proxy-$port.service" << EOF
+[Unit]
+Description=3proxy Instance Port $port
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=$INSTALL_DIR/bin/3proxy $instance_dir/3proxy.cfg
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target
+EOF
         
+        log_info "Tạo Instance #$count: Port $port -> $ip:$proxy_port (User: $user)"
+        
+        created_ports+=($port)
         port=$((port + 1))
     done < "$PROXY_LIST_FILE"
     
@@ -165,36 +184,41 @@ EOF
         exit 1
     fi
     
-    log_info "Đã tạo cấu hình cho $count proxy (Port $BASE_PORT - $((port - 1)))"
+    log_info "Đã tạo $count instance (Port $BASE_PORT - $((port - 1)))"
     
-    # Lưu số lượng port vào file để firewall sử dụng
-    echo "$count" > "$INSTALL_DIR/port_count.txt"
+    # Lưu thông tin
+    echo "$count" > "$INSTALL_DIR/instance_count.txt"
+    printf "%s\n" "${created_ports[@]}" > "$INSTALL_DIR/ports.txt"
 }
 
-# Tạo systemd service
-create_service() {
-    log_info "Tạo systemd service..."
+# Khởi động tất cả instances
+start_instances() {
+    log_info "Khởi động tất cả instance..."
     
-    cat > "$SERVICE_FILE" << EOF
-[Unit]
-Description=3proxy Proxy Server
-After=network.target
-
-[Service]
-Type=forking
-ExecStart=$INSTALL_DIR/bin/3proxy $CONFIG_FILE
-ExecReload=/bin/kill -HUP \$MAINPID
-KillMode=process
-Restart=on-failure
-RestartSec=10s
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
     systemctl daemon-reload
-    systemctl enable 3proxy
-    log_info "Systemd service đã được tạo"
+    
+    local failed=0
+    
+    while read -r port; do
+        systemctl enable "3proxy-$port.service"
+        if systemctl restart "3proxy-$port.service"; then
+            if systemctl is-active --quiet "3proxy-$port.service"; then
+                log_info "✓ Instance port $port đã khởi động"
+            else
+                log_error "✗ Instance port $port khởi động thất bại"
+                failed=$((failed + 1))
+            fi
+        else
+            log_error "✗ Lỗi khi khởi động instance port $port"
+            failed=$((failed + 1))
+        fi
+    done < "$INSTALL_DIR/ports.txt"
+    
+    if [ $failed -gt 0 ]; then
+        log_error "$failed instance khởi động thất bại. Kiểm tra log: journalctl -u 3proxy-* -n 50"
+    else
+        log_info "Tất cả instance đã khởi động thành công!"
+    fi
 }
 
 # Cấu hình firewall
@@ -205,31 +229,17 @@ configure_firewall() {
     systemctl enable --now firewalld
     
     # Đọc số lượng port
-    local port_count=$(cat "$INSTALL_DIR/port_count.txt")
-    local end_port=$((BASE_PORT + port_count - 1))
+    local instance_count=$(cat "$INSTALL_DIR/instance_count.txt")
+    local end_port=$((BASE_PORT + instance_count - 1))
     
     # Mở port range
     log_info "Mở port range: $BASE_PORT-$end_port"
-    firewall-cmd --permanent --add-port=${BASE_PORT}-${end_port}/tcp
+    firewall-cmd --permanent --add-port=${BASE_PORT}-${end_port}/tcp 2>/dev/null || true
     
     # Reload firewall
     firewall-cmd --reload
     
     log_info "Firewall đã được cấu hình"
-}
-
-# Khởi động service
-start_service() {
-    log_info "Khởi động 3proxy service..."
-    
-    systemctl restart 3proxy
-    
-    if systemctl is-active --quiet 3proxy; then
-        log_info "3proxy đã khởi động thành công!"
-    else
-        log_error "Lỗi khi khởi động 3proxy. Kiểm tra log: journalctl -u 3proxy -n 50"
-        exit 1
-    fi
 }
 
 # Hiển thị thông tin
@@ -240,12 +250,12 @@ show_info() {
     echo "=============================================="
     echo ""
     
-    local port_count=$(cat "$INSTALL_DIR/port_count.txt")
-    local end_port=$((BASE_PORT + port_count - 1))
+    local instance_count=$(cat "$INSTALL_DIR/instance_count.txt")
+    local end_port=$((BASE_PORT + instance_count - 1))
     local vps_ip=$(hostname -I | awk '{print $1}')
     
     echo "📊 THÔNG TIN HỆ THỐNG:"
-    echo "   - Số lượng proxy: $port_count"
+    echo "   - Số lượng proxy: $instance_count"
     echo "   - Port range: $BASE_PORT - $end_port"
     echo "   - VPS IP: $vps_ip"
     echo ""
@@ -258,30 +268,38 @@ show_info() {
     echo ""
     
     echo "🔧 LỆNH QUẢN LÝ:"
-    echo "   - Xem status: systemctl status 3proxy"
-    echo "   - Khởi động lại: systemctl restart 3proxy"
-    echo "   - Xem log: tail -f $LOG_DIR/3proxy.log"
+    echo "   - Xem tất cả instance: systemctl list-units '3proxy-*'"
+    echo "   - Xem status 1 port: systemctl status 3proxy-10000"
+    echo "   - Restart 1 port: systemctl restart 3proxy-10000"
+    echo "   - Xem log: tail -f $LOG_DIR/proxy-10000.log"
     echo "   - Cập nhật proxy: bash $0"
     echo ""
     
     echo "📁 FILE QUAN TRỌNG:"
-    echo "   - Config: $CONFIG_FILE"
+    echo "   - Instances dir: $INSTANCES_DIR"
     echo "   - Proxy list: $PROXY_LIST_FILE"
-    echo "   - Log: $LOG_DIR/3proxy.log"
+    echo "   - Logs: $LOG_DIR/"
     echo ""
     
-    echo "✅ DANH SÁCH PROXY:"
+    echo "✅ DANH SÁCH PROXY ĐANG CHẠY:"
     local port=$BASE_PORT
     while IFS=: read -r ip proxy_port user pass; do
         ip=$(echo "$ip" | tr -d '[:space:]')
         proxy_port=$(echo "$proxy_port" | tr -d '[:space:]')
         
         if [ -n "$ip" ] && [ -n "$proxy_port" ]; then
-            echo "   Android Port $port -> $ip:$proxy_port"
+            local status="❌"
+            if systemctl is-active --quiet "3proxy-$port.service"; then
+                status="✅"
+            fi
+            echo "   $status Port $port: $vps_ip:$port -> $ip:$proxy_port"
             port=$((port + 1))
         fi
     done < "$PROXY_LIST_FILE"
     
+    echo ""
+    echo "🧪 TEST PROXY:"
+    echo "   curl -x http://$vps_ip:$BASE_PORT https://api.ipify.org"
     echo ""
     echo "=============================================="
 }
@@ -290,7 +308,8 @@ show_info() {
 main() {
     echo ""
     echo "=============================================="
-    echo "  3PROXY AUTO SETUP - ALMALINUX 8.10"
+    echo "  3PROXY MULTI-INSTANCE AUTO SETUP"
+    echo "  ALMALINUX 8.10"
     echo "=============================================="
     echo ""
     
@@ -299,24 +318,19 @@ main() {
     # Kiểm tra nếu đã cài đặt
     if [ -f "$INSTALL_DIR/bin/3proxy" ]; then
         log_info "3proxy đã được cài đặt. Đang cập nhật cấu hình..."
-        # Đảm bảo thư mục log tồn tại
-        mkdir -p "$LOG_DIR"
-        touch "$LOG_DIR/3proxy.log"
-        chmod 644 "$LOG_DIR/3proxy.log"
-        
         download_proxy_list
-        generate_config
+        cleanup_old_instances
+        create_instances
         configure_firewall
-        start_service
+        start_instances
     else
         log_info "Bắt đầu cài đặt 3proxy từ đầu..."
         install_dependencies
         install_3proxy
         download_proxy_list
-        generate_config
-        create_service
+        create_instances
         configure_firewall
-        start_service
+        start_instances
     fi
     
     show_info

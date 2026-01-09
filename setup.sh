@@ -1,74 +1,61 @@
 #!/bin/bash
 set -e
 
-echo "=== SETUP 3PROXY ROUND-ROBIN V2 (ALMALINUX 8) ==="
+echo "=== SETUP 3PROXY ROUND-ROBIN V2.1 (ALMALINUX 8) ==="
 
-PORT=8888
 PROXY_FILE="/root/proxies.txt"
-CFG_DIR="/etc/3proxy"
-CFG_FILE="$CFG_DIR/3proxy.cfg"
+CFG_FILE="/etc/3proxy/3proxy.cfg"
 BIN="/usr/local/bin/3proxy"
-LOG_DIR="/var/log/3proxy"
+SERVICE="3proxy"
 
 # -----------------------------
-# 0. Pre-check
+# 1. Install build tools
 # -----------------------------
-if [ "$EUID" -ne 0 ]; then
-  echo "❌ Run as root"
-  exit 1
-fi
-
-if [ ! -f "$PROXY_FILE" ]; then
-  echo "❌ $PROXY_FILE not found!"
-  echo "Create it with format: ip:port:user:pass"
-  exit 1
-fi
-
-# -----------------------------
-# 1. Install deps
-# -----------------------------
-echo "[1/8] Installing dependencies..."
+echo "[1/7] Installing build tools..."
 dnf install -y gcc make git net-tools firewalld
 
 # -----------------------------
 # 2. Build 3proxy
 # -----------------------------
-echo "[2/8] Building 3proxy..."
+echo "[2/7] Building 3proxy..."
 cd /opt
 if [ ! -d "3proxy" ]; then
   git clone https://github.com/z3APA3A/3proxy.git
 fi
 cd 3proxy
 make -f Makefile.Linux
-cp bin/3proxy $BIN
-chmod +x $BIN
+cp -f bin/3proxy "$BIN"
 
 # -----------------------------
-# 3. Prepare folders
+# 3. Prepare directories
 # -----------------------------
-echo "[3/8] Preparing folders..."
-mkdir -p $CFG_DIR
-mkdir -p $LOG_DIR
-touch $LOG_DIR/3proxy.log
+echo "[3/7] Preparing folders..."
+mkdir -p /etc/3proxy
+mkdir -p /var/log/3proxy
 
 # -----------------------------
-# 4. Generate config
+# 4. Prepare proxy file (can be empty)
 # -----------------------------
-echo "[4/8] Generating config..."
+if [ ! -f "$PROXY_FILE" ]; then
+  echo "⚠️ $PROXY_FILE not found – creating empty list"
+  touch "$PROXY_FILE"
+fi
 
-cat > $CFG_FILE <<EOF
+# -----------------------------
+# 5. Generate base config
+# -----------------------------
+echo "[4/7] Generating base 3proxy config..."
+
+cat > "$CFG_FILE" <<EOF
 daemon
 maxconn 1000
 nscache 65536
-cache 0
 
-log $LOG_DIR/3proxy.log D
-logformat "L%Y-%m-%d %H:%M:%S %N.%p %E %U %C:%R -> %r"
+log /var/log/3proxy/3proxy.log D
 rotate 30
 
 # Android không cần auth
 auth none
-allow *
 
 timeouts 1 5 30 60 180 1800 15 60
 
@@ -77,37 +64,36 @@ EOF
 
 COUNT=0
 while IFS=: read -r ip port user pass; do
-  if [[ -n "$ip" && -n "$port" && -n "$user" && -n "$pass" ]]; then
-    echo "parent 1000 http $user $pass $ip $port" >> $CFG_FILE
+  if [[ -n "\$ip" && -n "\$port" && -n "\$user" && -n "\$pass" ]]; then
+    echo "parent 1000 http \$user \$pass \$ip \$port" >> "$CFG_FILE"
     ((COUNT++))
   fi
-done < $PROXY_FILE
+done < "$PROXY_FILE"
 
 if [ "$COUNT" -eq 0 ]; then
-  echo "❌ No valid proxies loaded"
-  exit 1
+  echo "# (no parent proxies yet)" >> "$CFG_FILE"
 fi
 
-cat >> $CFG_FILE <<EOF
+cat >> "$CFG_FILE" <<EOF
 
 # ===== LOCAL PROXY FOR ANDROID =====
-proxy -p$PORT -a
+proxy -p8888 -a
 EOF
 
-echo "✓ Loaded $COUNT parent proxies"
+echo "✓ Base config created ($COUNT parents)"
 
 # -----------------------------
-# 5. Firewall
+# 6. Firewall
 # -----------------------------
-echo "[5/8] Opening firewall port $PORT..."
+echo "[5/7] Opening firewall..."
 systemctl enable firewalld --now
-firewall-cmd --add-port=$PORT/tcp --permanent
+firewall-cmd --add-port=8888/tcp --permanent
 firewall-cmd --reload
 
 # -----------------------------
-# 6. systemd service
+# 7. systemd service
 # -----------------------------
-echo "[6/8] Creating systemd service..."
+echo "[6/7] Creating systemd service..."
 
 cat > /etc/systemd/system/3proxy.service <<EOF
 [Unit]
@@ -118,7 +104,6 @@ After=network.target
 Type=simple
 ExecStart=$BIN $CFG_FILE
 Restart=always
-RestartSec=3
 LimitNOFILE=65535
 
 [Install]
@@ -129,26 +114,13 @@ systemctl daemon-reload
 systemctl enable 3proxy
 systemctl restart 3proxy
 
-# -----------------------------
-# 7. Test local
-# -----------------------------
-echo "[7/8] Quick test (local)..."
-sleep 2
-curl -s -x http://127.0.0.1:$PORT https://api.ipify.org || true
 echo ""
-
-# -----------------------------
-# 8. Done
-# -----------------------------
 echo "======================================"
-echo "✅ 3PROXY V2 INSTALLED & RUNNING"
+echo "✅ 3PROXY V2.1 INSTALLED"
 echo "======================================"
-echo "Port for Android: $PORT"
-echo "Set Android proxy to:"
-echo "  VPS_IP:$PORT"
+echo "Android set proxy to:"
+echo "  VPS_IP:8888"
+echo "--------------------------------------"
+echo "When ready, run:"
+echo "  /root/update_proxies.sh"
 echo ""
-echo "Useful commands:"
-echo "  systemctl status 3proxy"
-echo "  systemctl restart 3proxy"
-echo "  tail -f $LOG_DIR/3proxy.log"
-echo "======================================"

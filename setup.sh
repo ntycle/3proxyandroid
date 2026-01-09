@@ -70,7 +70,7 @@ mv "$PROXY_FILE.tmp" "$PROXY_FILE"
 echo "✓ Proxy list updated ($(wc -l < "$PROXY_FILE") lines)"
 
 # ------------------------------------------------
-# 4. Build 3proxy config - FIXED PARSING
+# 4. Build 3proxy config - CORRECTED
 # ------------------------------------------------
 echo "[4/7] Building 3proxy config..."
 
@@ -104,7 +104,7 @@ COUNT=0
 
 echo "Processing proxy list..."
 
-# Process proxy list
+# Process proxy list - FIXED: reading from PROXY_FILE not CFG_FILE
 while IFS= read -r line || [[ -n "$line" ]]; do
   # Remove leading/trailing whitespace and carriage returns
   line=$(echo "$line" | tr -d '\r' | xargs)
@@ -116,7 +116,6 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   echo "Processing: $line"
   
   # Parse ip:port:user:pass format
-  # Using regex to properly handle all cases
   if [[ "$line" =~ ^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+):([^:]+):(.+)$ ]]; then
     ip="${BASH_REMATCH[1]}"
     port="${BASH_REMATCH[2]}"
@@ -142,16 +141,12 @@ PROXYCONFIG
     ((PORT++))
   else
     echo "  ✗ Skipping - invalid format"
-    echo "    Expected: ip:port:username:password"
-    echo "    Got: $line"
   fi
   
-done < "$PROXY_FILE"
+done < "$PROXY_FILE"  # <-- ĐÃ SỬA: "$PROXY_FILE" thay vì "$CFG_FILE"
 
 if [ "$COUNT" -eq 0 ]; then
   echo "❌ No valid proxies found!"
-  echo "First few lines of file:"
-  head -n 5 "$PROXY_FILE"
   exit 1
 fi
 
@@ -218,13 +213,11 @@ if systemctl is-active --quiet "$SERVICE"; then
   
   # Show listening ports
   echo "Listening ports:"
-  netstat -tlnp | grep 3proxy || ss -tlnp | grep 3proxy || true
+  ss -tlnp | grep 3proxy || netstat -tlnp | grep 3proxy || echo "  (check with: ss -tlnp | grep 9001)"
 else
   echo "❌ Service failed to start!"
   echo "=== Checking logs ==="
   journalctl -u "$SERVICE" -n 30 --no-pager
-  echo "=== Config file (last 20 lines) ==="
-  tail -n 20 "$CFG_FILE"
   exit 1
 fi
 
@@ -242,6 +235,4 @@ echo ""
 echo "Commands:"
 echo "  Check status: systemctl status $SERVICE"
 echo "  View logs:    journalctl -u $SERVICE -f"
-echo "  Stop:         systemctl stop $SERVICE"
-echo "  Restart:      systemctl restart $SERVICE"
 echo ""

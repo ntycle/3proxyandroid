@@ -132,11 +132,11 @@ EOF
     local count=0
     
     while IFS=: read -r ip proxy_port user pass; do
-        # Loại bỏ khoảng trắng
+        # Loại bỏ khoảng trắng và ký tự xuống dòng
         ip=$(echo "$ip" | tr -d '[:space:]')
         proxy_port=$(echo "$proxy_port" | tr -d '[:space:]')
         user=$(echo "$user" | tr -d '[:space:]')
-        pass=$(echo "$pass" | tr -d '[:space:]')
+        pass=$(echo "$pass" | tr -d '[:space:]' | tr -d '\r')
         
         # Kiểm tra định dạng
         if [ -z "$ip" ] || [ -z "$proxy_port" ] || [ -z "$user" ] || [ -z "$pass" ]; then

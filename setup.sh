@@ -12,129 +12,133 @@ SERVICE="3proxy"
 
 echo "=== 3PROXY FINAL SETUP (NO DAEMON ISSUE) ==="
 
-# ------------------------------------------------
-# 1. Install deps + 3proxy (if not exists)
-# ------------------------------------------------
-if ! command -v 3proxy >/dev/null 2>&1; then
-  echo "[1/7] Installing 3proxy..."
-  dnf install -y gcc make git firewalld curl tar
-  
-  # Install dependencies for CentOS/RHEL 8+
-  dnf groupinstall -y "Development Tools"
-  
-  cd /opt
-  if [ ! -d "3proxy" ]; then
-    git clone https://github.com/z3APA3A/3proxy.git
-  fi
-  cd 3proxy
-  
-  # Fix for newer systems
-  sed -i 's/-m64//g' Makefile.Linux
-  sed -i 's/-march=i686//g' Makefile.Linux
-  
-  make -f Makefile.Linux
-  mkdir -p /usr/local/bin
-  cp bin/3proxy "$BIN"
-  chmod +x "$BIN"
-fi
+# ... (giữ nguyên phần 1-3) ...
 
 # ------------------------------------------------
-# 2. Prepare folders
-# ------------------------------------------------
-echo "[2/7] Preparing folders..."
-mkdir -p /etc/3proxy
-mkdir -p /var/log/3proxy
-touch /var/log/3proxy/3proxy.log
-chmod 666 /var/log/3proxy/3proxy.log
-
-# ------------------------------------------------
-# 3. Update proxy list
-# ------------------------------------------------
-echo "[3/7] Updating proxy list..."
-curl -fsSL "$PROXY_URL" -o "$PROXY_FILE.tmp" || {
-  echo "❌ Proxy list download failed"
-  exit 1
-}
-
-if [ ! -s "$PROXY_FILE.tmp" ]; then
-  echo "❌ Proxy list is empty"
-  exit 1
-fi
-
-# Backup if exists
-if [ -f "$PROXY_FILE" ]; then
-  cp -f "$PROXY_FILE" "$PROXY_FILE.bak.$(date +%F_%H%M%S)"
-fi
-
-mv "$PROXY_FILE.tmp" "$PROXY_FILE"
-echo "✓ Proxy list updated ($(wc -l < "$PROXY_FILE") lines)"
-
-# ------------------------------------------------
-# 4. Build 3proxy config
+# 4. Build 3proxy config - FIXED VERSION
 # ------------------------------------------------
 echo "[4/7] Building 3proxy config..."
 
 # Start with basic config
 cat > "$CFG_FILE" <<EOF
 # ===== BASIC SETTINGS =====
+nserver 8.8.8.8
+nserver 1.1.1.1
+
 maxconn 1000
 nscache 65536
 
 log /var/log/3proxy/3proxy.log D
 rotate 30
 
-auth none
-allow *
-
-timeouts 1 5 30 60 180 1800 15 60
+archiver gz /usr/bin/gzip %F
+counter /etc/3proxy/3proxy.3cf
 
 users \$/etc/3proxy/passwd
+auth strong
+
+allow * * * 80-88,8080
+allow * * * 443
+allow * * * 9001-9100
+
+timeouts 1 5 30 60 180 1800 15 60
 EOF
 
 # Create empty password file
-touch /etc/3proxy/passwd
+> /etc/3proxy/passwd
 
 PORT=$BASE_PORT
 COUNT=0
 
+echo "Processing proxy list..."
+
+# Debug: show first few lines
+echo "First 3 lines of proxy file:"
+head -n 3 "$PROXY_FILE"
+
 # Process proxy list
 while IFS= read -r line || [[ -n "$line" ]]; do
-  # Remove leading/trailing whitespace
-  line=$(echo "$line" | xargs)
+  # Remove leading/trailing whitespace and carriage returns
+  line=$(echo "$line" | tr -d '\r' | xargs)
   
   # Skip empty lines and comments
   [[ -z "$line" ]] && continue
   [[ "$line" == \#* ]] && continue
   
-  # Parse ip:port:user:pass format
-  ip=$(echo "$line" | cut -d: -f1)
-  p=$(echo "$line" | cut -d: -f2)
-  user=$(echo "$line" | cut -d: -f3)
-  pass=$(echo "$line" | cut -d: -f4)
+  echo "Processing line: $line"
   
-  if [[ -n "$ip" && -n "$p" && -n "$user" && -n "$pass" ]]; then
-    echo "" >> "$CFG_FILE"
-    echo "# ===== PROXY $((COUNT+1)) =====" >> "$CFG_FILE"
-    echo "parent 1000 http $ip $p $user $pass" >> "$CFG_FILE"
-    echo "proxy -p$PORT" >> "$CFG_FILE"
-    echo "flush" >> "$CFG_FILE"
+  # Try different formats
+  # Format 1: ip:port:user:pass
+  if [[ "$line" =~ ^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+):([^:]+):([^:]+)$ ]]; then
+    ip="${BASH_REMATCH[1]}"
+    p="${BASH_REMATCH[2]}"
+    user="${BASH_REMATCH[3]}"
+    pass="${BASH_REMATCH[4]}"
     
-    # Add to password file
-    echo "$user:CL:$pass" >> /etc/3proxy/passwd
+    echo "  Matched format: ip:port:user:pass"
+    
+  # Format 2: user:pass@ip:port (common format)
+  elif [[ "$line" =~ ^([^:@]+):([^:@]+)@([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)$ ]]; then
+    user="${BASH_REMATCH[1]}"
+    pass="${BASH_REMATCH[2]}"
+    ip="${BASH_REMATCH[3]}"
+    p="${BASH_REMATCH[4]}"
+    
+    echo "  Matched format: user:pass@ip:port"
+    
+  # Format 3: ip:port (no auth)
+  elif [[ "$line" =~ ^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)$ ]]; then
+    ip="${BASH_REMATCH[1]}"
+    p="${BASH_REMATCH[2]}"
+    user="anonymous"
+    pass="anonymous"
+    
+    echo "  Matched format: ip:port (no auth)"
+  else
+    echo "  Skipping - unrecognized format"
+    continue
+  fi
+  
+  if [[ -n "$ip" && -n "$p" ]]; then
+    echo "  Adding proxy $COUNT: $user:***@$ip:$p -> local port $PORT"
+    
+    # Add to 3proxy config
+    cat >> "$CFG_FILE" <<PROXYCONFIG
+
+# ===== PROXY $((COUNT+1)) =====
+allow $user
+parent 1000 http $ip $p $user $pass
+proxy -p$PORT -a
+PROXYCONFIG
+    
+    # Add to password file (for auth strong)
+    if [[ "$user" != "anonymous" ]]; then
+      echo "$user:CL:$pass" >> /etc/3proxy/passwd
+    fi
     
     ((COUNT++))
     ((PORT++))
+  else
+    echo "  Invalid proxy data"
   fi
+  
 done < "$PROXY_FILE"
 
 if [ "$COUNT" -eq 0 ]; then
   echo "❌ No valid proxies found in the list"
-  echo "Sample format required: ip:port:username:password"
+  echo "Current file content:"
+  cat "$PROXY_FILE"
+  echo ""
+  echo "Supported formats:"
+  echo "  1. ip:port:username:password"
+  echo "  2. username:password@ip:port"
+  echo "  3. ip:port"
   exit 1
 fi
 
 echo "✓ Generated config with $COUNT proxies"
-echo "  Port range: $BASE_PORT → $((BASE_PORT+COUNT-1))"
+echo "✓ Port range: $BASE_PORT → $((BASE_PORT+COUNT-1))"
+
 
 # ------------------------------------------------
 # 5. Firewall
